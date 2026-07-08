@@ -12,8 +12,8 @@ import requests
 log = logging.getLogger("notify")
 
 # TG 配置（从环境变量读取，为空则跳过通知）
-TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN", "")
-TG_CHAT_ID = os.getenv("TG_CHAT_ID", "")
+TG_BOT_TOKEN = os.getenv("TG_BOT_TOKEN") or ""
+TG_CHAT_ID = os.getenv("TG_CHAT_ID") or ""
 
 
 def send_tg_notification(data: dict) -> bool:

@@ -15,10 +15,10 @@ import requests
 # ---------------------------------------------------------------------------
 # 配置（从环境变量读取）
 # ---------------------------------------------------------------------------
-BASE_URL = os.getenv("IAMHC_BASE_URL", "https://api.iamhc.cn")
-USERNAME = os.getenv("IAMHC_USERNAME", "")
-PASSWORD = os.getenv("IAMHC_PASSWORD", "")
-USER_ID = os.getenv("IAMHC_USER_ID", "0")
+BASE_URL = os.getenv("IAMHC_BASE_URL") or "https://api.iamhc.cn"
+USERNAME = os.getenv("IAMHC_USERNAME") or ""
+PASSWORD = os.getenv("IAMHC_PASSWORD") or ""
+USER_ID = os.getenv("IAMHC_USER_ID") or ""
 
 # IAMHC 配额 → 美元换算：1 USD = 500000 quota
 QUOTA_PER_UNIT = 500000
@@ -214,7 +214,7 @@ def main():
     session = create_session()
 
     # 2. 尝试从 SESSION_COOKIE 变量恢复 session（仅 GitHub Actions 环境）
-    session_encoded = os.getenv("IAMHC_SESSION_COOKIE", "")
+    session_encoded = os.getenv("IAMHC_SESSION_COOKIE") or ""
     session_valid = False
     if session_encoded:
         log.info("检测到 IAMHC_SESSION_COOKIE 变量，尝试恢复 session...")
