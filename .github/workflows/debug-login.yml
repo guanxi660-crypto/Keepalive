@@ -1,0 +1,157 @@
+name: 🐞 Debug login (Playwright)
+
+on:
+  workflow_dispatch:          # 手动触发，便于反复调试
+
+jobs:
+  debug-login:
+    runs-on: ubuntu-latest
+    steps:
+      # -------------------------------------------------
+      # 1️⃣ 拉取代码
+      # -------------------------------------------------
+      - uses: actions/checkout@v4
+
+      # -------------------------------------------------
+      # 2️⃣ 安装 Python + Playwright
+      # -------------------------------------------------
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Install Playwright & browsers
+        run: |
+          python -m pip install --upgrade pip
+          pip install playwright
+          playwright install-deps          # 系统依赖
+          playwright install chromium      # 下载 Chromium 二进制
+
+      # -------------------------------------------------
+      # 3️⃣ 检查并展示 ACCOUNTS（不泄漏完整密码）
+      # -------------------------------------------------
+      - name: 🔎 检查 ACCOUNTS 环境变量
+        id: env-check
+        run: |
+          raw="${ACCOUNTS}"
+          echo "🔹 原始长度: ${#raw}"
+          if [ -z "$raw" ]; then
+            echo "❌ ACCOUNTS 为空！请在 Settings → Secrets 中确认已设置。"
+            exit 1
+          fi
+          # 只显示前5后5字符，防止泄漏
+          head=${raw:0:5}
+          tail=${raw: -5}
+          echo "✅ 前5位: $head … 后5位: $tail"
+          echo "🔍 十六进制转储（前30字节）:"
+          printf "%s" "$raw" | od -An -tx1 | head -c 60
+        env:
+          ACCOUNTS: ${{ secrets.ACCOUNTS }}
+
+      # -------------------------------------------------
+      # 4️⃣ 用 Python 把 ACCOUNTS 解析出来并打印邮箱/密码长度
+      # -------------------------------------------------
+      - name: 🐍 解析账号信息（调试用）
+        id: parse-check
+        run: |
+          python <<'PY'
+          import os, json
+          raw = os.getenv("ACCOUNTS", "")
+          def parse_accounts_string(s):
+              res = []
+              for item in filter(None, (x.strip() for x in s.split(","))):
+                  if ":" not in item: continue
+                  email, pwd = item.split(":", 1)
+                  res.append({"email": email.strip(), "password": pwd})
+              return res
+          accs = parse_accounts_string(raw)
+          for a in accs:
+              print(f"[DEBUG] 解析得到 -> email={a['email']!r}, pwd_len={len(a['password'])}")
+          # 把解析结果写到临时文件，后面若需要可直接读取
+          with open("/tmp/parsed.json", "w", encoding="utf-8") as f:
+              json.dump(accs, f, ensure_ascii=False, indent=2)
+          PY
+        env:
+          ACCOUNTS: ${{ secrets.ACCOUNTS }}
+
+      # -------------------------------------------------
+      # 5️⃣ 运行带网络拦截的登录脚本（headless，适用于 CI）
+      #    它会把登录请求的完整响应体（JSON 或文本）打印出来
+      # -------------------------------------------------
+      - name: 🎭 运行带调试的登录脚本（仅调试）
+        id: login-debug
+        run: |
+          cat > /tmp/debug_login.py <<'PY'
+          import asyncio, json, os
+          from playwright.async_api import async_playwright
+
+          async def main():
+              # ---- 读取并解析 ACCOUNTS ----
+              raw = os.getenv("ACCOUNTS", "")
+              def parse(s):
+                  res = []
+                  for i in filter(None, (x.strip() for x in s.split(","))):
+                      if ":" not in i: continue
+                      e, p = i.split(":", 1)
+                      res.append({"email": e.strip(), "password": p})
+                  return res
+              accs = parse(raw)
+              if not accs:
+                  print("❌ 没有解析到任何账号")
+                  return
+              acc = accs[0]          # 这里只调试第一个账号
+              email = acc["email"]
+              pwd   = acc["password"]
+              print(f"🔑 将要使用的账号: {email}")
+              print(f"🔑 密码长度: {len(pwd)}")
+
+              # ---- 启动浏览器（headless=True）----
+              async with async_playwright() as p:
+                  browser = await p.chromium.launch(headless=True)
+                  context = await browser.new_context()
+                  page = await context.new_page()
+
+                  # 拦截所有响应，专门打印登录相关接口
+                  async def handle_response(resp):
+                      # 这里使用宽泛匹配：只要 URL 包含 login 或 auth 就打印
+                      if "login" in str(resp.url).lower() or "auth" in str(resp.url).lower():
+                          try:
+                              json_body = await resp.json()
+                              print(f"🌐 响应 URL: {resp.url}")
+                              print(f"📦 响应体 (JSON): {json.dumps(json_body, ensure_ascii=False, indent=2)}")
+                          except Exception:
+                              txt = await resp.text()
+                              print(f"🌐 响应 URL: {resp.url}")
+                              print(f"📄 响应体 (文本前 200 字符): {txt[:200]}")
+
+                  page.on("response", handle_response)
+
+                  # 打开登录页
+                  await page.goto("https://my.rustix.me/auth/login", wait_until="networkidle")
+                  # 填写用户名/密码（根据实际页面的 name/placeholder 自行调整选择器）
+                  await page.fill('input[name="email"]', email)
+                  await page.fill('input[name="password"]', pwd)
+                  # 登录按钮文字是俄文 “Войти”
+                  await page.click('button:has-text("Войти")')
+                  # 等待一会儿，看看是否跳转或出现错误提示
+                  await page.wait_for_timeout(8000)
+
+                  await browser.close()
+
+          asyncio.run(main())
+          PY
+          python /tmp/debug_login.py
+        env:
+          ACCOUNTS: ${{ secrets.ACCOUNTS }}
+
+      # -------------------------------------------------
+      # 6️⃣ 如果上面的调试一切正常（返回体里没有出现验证码/二次验证等），
+      #    才打开真正的业务脚本。这里默认关闭，调试通过后把 if: false 改成 if: true
+      # -------------------------------------------------
+      - name: ▶️ 运行实际的 main.py（调试通过后打开）
+        if: false   # <-- 调试成功后改成 true
+        run: python main.py
+        env:
+          ACCOUNTS: ${{ secrets.ACCOUNTS }}
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
