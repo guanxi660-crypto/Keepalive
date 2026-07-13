@@ -13,7 +13,7 @@ jobs:
       - uses: actions/checkout@v4
 
       # -------------------------------------------------
-      # 2️⃣ 安装 Python + Playwright
+      # 2️⃣ 安装 Python + Playwright（含浏览器二进制）
       # -------------------------------------------------
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -25,7 +25,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install playwright
           playwright install-deps          # 系统依赖
-          playwright install chromium      # 下载 Chromium 二进制
+          playwright install chromium      # 下载 Chromium
 
       # -------------------------------------------------
       # 3️⃣ 检查并展示 ACCOUNTS（不泄漏完整密码）
@@ -39,7 +39,6 @@ jobs:
             echo "❌ ACCOUNTS 为空！请在 Settings → Secrets 中确认已设置。"
             exit 1
           fi
-          # 只显示前5后5字符，防止泄漏
           head=${raw:0:5}
           tail=${raw: -5}
           echo "✅ 前5位: $head … 后5位: $tail"
@@ -67,7 +66,6 @@ jobs:
           accs = parse_accounts_string(raw)
           for a in accs:
               print(f"[DEBUG] 解析得到 -> email={a['email']!r}, pwd_len={len(a['password'])}")
-          # 把解析结果写到临时文件，后面若需要可直接读取
           with open("/tmp/parsed.json", "w", encoding="utf-8") as f:
               json.dump(accs, f, ensure_ascii=False, indent=2)
           PY
@@ -75,8 +73,7 @@ jobs:
           ACCOUNTS: ${{ secrets.ACCOUNTS }}
 
       # -------------------------------------------------
-      # 5️⃣ 运行带网络拦截的登录脚本（headless，适用于 CI）
-      #    它会把登录请求的完整响应体（JSON 或文本）打印出来
+      # 5️⃣ 运行带网络拦截的登录脚本（headless）
       # -------------------------------------------------
       - name: 🎭 运行带调试的登录脚本（仅调试）
         id: login-debug
@@ -111,18 +108,25 @@ jobs:
                   context = await browser.new_context()
                   page = await context.new_page()
 
-                  # 拦截所有响应，专门打印登录相关接口
+                  # 拦截响应，只在成功时尝试读取体
                   async def handle_response(resp):
-                      # 这里使用宽泛匹配：只要 URL 包含 login 或 auth 就打印
+                      # 只要是登录/认证相关的 URL 就打印信息
                       if "login" in str(resp.url).lower() or "auth" in str(resp.url).lower():
-                          try:
-                              json_body = await resp.json()
-                              print(f"🌐 响应 URL: {resp.url}")
-                              print(f"📦 响应体 (JSON): {json.dumps(json_body, ensure_ascii=False, indent=2)}")
-                          except Exception:
-                              txt = await resp.text()
-                              print(f"🌐 响应 URL: {resp.url}")
-                              print(f"📄 响应体 (文本前 200 字符): {txt[:200]}")
+                          if resp.ok:   # 2xx
+                              try:
+                                  json_body = await resp.json()
+                                  print(f"🌐 响应 URL: {resp.url}")
+                                  print(f"📦 响应体 (JSON): {json.dumps(json_body, ensure_ascii=False, indent=2)}")
+                              except Exception:
+                                  txt = await resp.text()
+                                  print(f"🌐 响应 URL: {resp.url}")
+                                  print(f"📄 响应体 (文本前 200 字符): {txt[:200]}")
+                          else:
+                              # 重定向或错误，只记录状态和可能的 Location
+                              location = resp.headers.get("location", "")
+                              print(f"🌐 响应 URL: {resp.url} | 状态: {resp.status}")
+                              if location:
+                                  print(f"   ↳ 重定向到: {location}")
 
                   page.on("response", handle_response)
 
@@ -133,8 +137,39 @@ jobs:
                   await page.fill('input[name="password"]', pwd)
                   # 登录按钮文字是俄文 “Войти”
                   await page.click('button:has-text("Войти")')
-                  # 等待一会儿，看看是否跳转或出现错误提示
-                  await page.wait_for_timeout(8000)
+
+                  # 等待页面导航完成（网络空闲），此时应已经是登录后的页面或出现错误提示
+                  await page.wait_for_load_state('networkidle')
+                  # 额外等待一会儿以确保可能的错误提示出现
+                  await page.wait_for_timeout(3000)
+
+                  # 判断登录是否成功：如果 URL 不再包含 login/auth 且不含明显的错误提示文字，则视为成功
+                  final_url = page.url
+                  print(f"🟢 最终页面 URL: {final_url}")
+                  if any(x in final_url.lower() for x in ["dashboard", "home", "profile", "account"]) \
+                     and "login" not in final_url.lower() and "auth" not in final_url.lower():
+                      print("✅ 登录成功（根据 URL 判断）")
+                  else:
+                      # 尝试在页面中寻找明显的错误文字（中文/英文/俄文等常见错误提示）
+                      error_selectors = [
+                          ".alert-danger", ".error", ".notify-error",
+                          "text=账号或密码错误",
+                          "text=用户名或密码错误",
+                          "text=Invalid credentials",
+                          "text=Неверный логин или пароль"
+                      ]
+                      found = False
+                      for sel in error_selectors:
+                          try:
+                              if await page.is_visible(sel):
+                                  print(f"❌ 检测到错误提示: {sel}")
+                                  found = True
+                                  break
+                          except:
+                              pass
+                      if not found:
+                      # 没有明确错误提示且 URL 仍停留在登录页，则视为未知状态
+                          print("⚠️ 无法明确判断登录状态（URL 未跳转且未发现错误提示）")
 
                   await browser.close()
 
